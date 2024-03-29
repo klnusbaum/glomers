@@ -6,13 +6,6 @@ import (
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
 
-type EchoBody struct {
-	Type      string `json:"type"`
-	MsgId     int    `json:"msg_id"`
-	InReplyTo int    `json:"in_reply_to"`
-	Echo      string `json:"echo"`
-}
-
 func main() {
 	node := maelstrom.NewNode()
 
