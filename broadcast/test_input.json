@@ -1,0 +1,4 @@
+{ "src": "c1", "dst": "n1", "body": { "type": "broadcast", "message": 1000 } }
+{ "src": "c1", "dst": "n1", "body": { "type": "read" } }
+{ "src": "c1", "dst": "n1", "body": { "type": "read" } }
+{ "src": "c1", "dst": "n1", "body": { "type": "read" } }
