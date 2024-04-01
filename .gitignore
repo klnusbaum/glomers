@@ -23,3 +23,9 @@ go.work
 #maelstrom files
 maelstrom/
 store/
+
+#Binaries
+echo/echo
+uid/uid
+broadcast/broadcast
+
