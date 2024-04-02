@@ -1,10 +1,11 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
@@ -148,21 +149,29 @@ func (r *replicator) startReplicate(val int) {
 	}
 
 	for _, neighbor := range r.ti.neighbors() {
-		r.replicateToNeighbor(msg, neighbor)
+		go r.replicateToNeighbor(msg, neighbor)
 	}
 }
 
 func (r *replicator) replicateToNeighbor(msg ReplicateMsg, neighbor string) {
-	r.node.RPC(neighbor, msg, func(reply maelstrom.Message) error {
+	backoff := 200
+	for {
+		timeout, _ := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		reply, err := r.node.SyncRPC(timeout, neighbor, msg)
 		var response map[string]any
 		if err := json.Unmarshal(reply.Body, &response); err != nil {
-			return fmt.Errorf("unmarshal body: %s", err)
+			continue
 		}
 		if response["type"] != "replicate_ok" {
-			r.replicateToNeighbor(msg, neighbor)
+			continue
 		}
-		return nil
-	})
+		if err == nil {
+			break
+		}
+
+		time.Sleep(time.Duration(backoff) * time.Millisecond)
+		backoff *= 2
+	}
 }
 
 func (r *replicator) handleMsg(msg maelstrom.Message) error {
@@ -182,7 +191,7 @@ func (r *replicator) handleMsg(msg maelstrom.Message) error {
 
 	r.node.Reply(msg, &ReplicateOkMsg{
 		Type: "replicate_ok",
-    })
+	})
 
 	return nil
 }
