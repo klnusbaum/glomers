@@ -2,64 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"sync"
-	"time"
+	"sync/atomic"
 
 	maelstrom "github.com/jepsen-io/maelstrom/demo/go"
 )
-
-type Tracker struct {
-	mu   sync.Mutex
-	seen map[int]bool
-}
-
-func NewTracker() *Tracker {
-	return &Tracker{
-		seen: make(map[int]bool),
-	}
-}
-
-func (t *Tracker) AddValue(i int) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.seen[i] = true
-}
-
-func (t *Tracker) Values() []int {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	vals := make([]int, 0, len(t.seen))
-	for key, val := range t.seen {
-		if val {
-			vals = append(vals, key)
-		}
-	}
-	return vals
-}
-
-type TopologyInfo struct {
-	myNeighboors []string
-	ready        sync.WaitGroup
-	init         sync.Once
-}
-
-func NewTopologyInfo() *TopologyInfo {
-	ti := TopologyInfo{}
-	ti.ready.Add(1)
-	return &ti
-}
-
-func (ti *TopologyInfo) Set(me string, topology map[string][]string) {
-	ti.myNeighboors = topology[me]
-	ti.init.Do(func() {
-		ti.ready.Done()
-	})
-}
-
-func (ti *TopologyInfo) Neighbors() []string {
-	ti.ready.Wait()
-	return ti.myNeighboors
-}
 
 type BroadcastMsg struct {
 	Type    string `json:"type"`
@@ -76,27 +24,38 @@ type TopologyMsg struct {
 	Topology map[string][]string `json:"topology"`
 }
 
+type ReplicateMsg struct {
+	Type         string          `json:"type"`
+	Message      int             `json:"message"`
+	ReplicatedTo map[string]bool `json:"replicated_to"`
+}
+
+type ReplicateOkMsg struct {
+	Type string `json:"type"`
+}
+
 func main() {
-	tracker := NewTracker()
-	topologyInfo := NewTopologyInfo()
+	tracker := newTracker()
+	ti := newTopologyInfo()
 	node := maelstrom.NewNode()
-	th := newTopoHandler(topologyInfo, node)
+	replicator := NewReplicator(node, ti, tracker)
+	th := newTopoHandler(node, ti)
 	rh := newReadHandler(tracker, node)
-	rb := newRebroadcaster(node, topologyInfo)
-	bh := newBroadcastHandler(node, tracker, rb)
+	bh := newBroadcastHandler(node, tracker, replicator)
 	node.Handle("topology", th.handleMsg)
 	node.Handle("read", rh.handleMsg)
 	node.Handle("broadcast", bh.handleMsg)
+	node.Handle("replicate", replicator.handleMsg)
 
 	node.Run()
 }
 
 type topohandler struct {
-	ti   *TopologyInfo
+	ti   *topologyInfo
 	node *maelstrom.Node
 }
 
-func newTopoHandler(ti *TopologyInfo, node *maelstrom.Node) *topohandler {
+func newTopoHandler(node *maelstrom.Node, ti *topologyInfo) *topohandler {
 	return &topohandler{
 		ti:   ti,
 		node: node,
@@ -109,7 +68,7 @@ func (th *topohandler) handleMsg(msg maelstrom.Message) error {
 		return err
 	}
 
-	th.ti.Set(th.node.ID(), topologyMsg.Topology)
+	th.ti.set(th.node.ID(), topologyMsg.Topology)
 
 	response := map[string]string{
 		"type": "topology_ok",
@@ -118,20 +77,19 @@ func (th *topohandler) handleMsg(msg maelstrom.Message) error {
 }
 
 type readHandler struct {
-	tracker *Tracker
+	tracker *tracker
 	node    *maelstrom.Node
 }
 
-func newReadHandler(tracker *Tracker, node *maelstrom.Node) *readHandler {
+func newReadHandler(tracker *tracker, node *maelstrom.Node) *readHandler {
 	return &readHandler{
 		tracker: tracker,
 		node:    node,
 	}
-
 }
 
 func (rh *readHandler) handleMsg(msg maelstrom.Message) error {
-	vals := rh.tracker.Values()
+	vals := rh.tracker.values()
 	response := ReadOkMsg{
 		Type:     "read_ok",
 		Messages: vals,
@@ -139,50 +97,17 @@ func (rh *readHandler) handleMsg(msg maelstrom.Message) error {
 	return rh.node.Reply(msg, response)
 }
 
-type rebroadcaster struct {
-	node *maelstrom.Node
-	ti   *TopologyInfo
-}
-
-func newRebroadcaster(node *maelstrom.Node, ti *TopologyInfo) *rebroadcaster {
-	return &rebroadcaster{
-		node: node,
-		ti:   ti,
-	}
-}
-
-func (r *rebroadcaster) broadcastToNeightbors(message BroadcastMsg) {
-	for _, neighbor := range r.ti.Neighbors() {
-		go r.broadcastToNeighbor(message, neighbor)
-	}
-}
-
-func (r *rebroadcaster) broadcastToNeighbor(message BroadcastMsg, neighbor string) {
-	r.node.RPC(neighbor, message, func(reply maelstrom.Message) error {
-		var response map[string]any
-		if err := json.Unmarshal(reply.Body, &response); err != nil {
-            time.Sleep(100 * time.Millisecond)
-			r.broadcastToNeighbor(message, neighbor)
-		}
-		if response["type"] != "broadcast_ok" {
-            time.Sleep(100 * time.Millisecond)
-			r.broadcastToNeighbor(message, neighbor)
-		}
-		return nil
-	})
-}
-
 type broadcastHandler struct {
-	node          *maelstrom.Node
-	tracker       *Tracker
-	rebroadcaster *rebroadcaster
+	node       *maelstrom.Node
+	tracker    *tracker
+	replicator *replicator
 }
 
-func newBroadcastHandler(node *maelstrom.Node, tracker *Tracker, rebrebroadcaster *rebroadcaster) *broadcastHandler {
+func newBroadcastHandler(node *maelstrom.Node, tracker *tracker, replicator *replicator) *broadcastHandler {
 	return &broadcastHandler{
-		node:          node,
-		tracker:       tracker,
-		rebroadcaster: rebrebroadcaster,
+		node:       node,
+		tracker:    tracker,
+		replicator: replicator,
 	}
 }
 
@@ -192,11 +117,130 @@ func (bh *broadcastHandler) handleMsg(msg maelstrom.Message) error {
 		return err
 	}
 
-	bh.tracker.AddValue(broadcastMsg.Message)
-	bh.rebroadcaster.broadcastToNeightbors(broadcastMsg)
+	bh.tracker.add(broadcastMsg.Message)
+	bh.replicator.startReplicate(broadcastMsg.Message)
 
 	response := map[string]any{
 		"type": "broadcast_ok",
 	}
 	return bh.node.Reply(msg, response)
+}
+
+type replicator struct {
+	node    *maelstrom.Node
+	ti      *topologyInfo
+	tracker *tracker
+}
+
+func NewReplicator(node *maelstrom.Node, ti *topologyInfo, tracker *tracker) *replicator {
+	return &replicator{
+		node:    node,
+		ti:      ti,
+		tracker: tracker,
+	}
+}
+
+func (r *replicator) startReplicate(val int) {
+	msg := ReplicateMsg{
+		Type:         "replicate",
+		Message:      val,
+		ReplicatedTo: map[string]bool{r.node.ID(): true},
+	}
+
+	for _, neighbor := range r.ti.neighbors() {
+		r.replicateToNeighbor(msg, neighbor)
+	}
+}
+
+func (r *replicator) replicateToNeighbor(msg ReplicateMsg, neighbor string) {
+	r.node.RPC(neighbor, msg, func(reply maelstrom.Message) error {
+		var response map[string]any
+		if err := json.Unmarshal(reply.Body, &response); err != nil {
+			return fmt.Errorf("unmarshal body: %s", err)
+		}
+		if response["type"] != "replicate_ok" {
+			r.replicateToNeighbor(msg, neighbor)
+		}
+		return nil
+	})
+}
+
+func (r *replicator) handleMsg(msg maelstrom.Message) error {
+	var replicateMsg ReplicateMsg
+	if err := json.Unmarshal(msg.Body, &replicateMsg); err != nil {
+		return err
+	}
+
+	r.tracker.add(replicateMsg.Message)
+	replicateMsg.ReplicatedTo[r.node.ID()] = true
+	for _, neighbor := range r.ti.neighbors() {
+		if replicateMsg.ReplicatedTo[neighbor] {
+			continue
+		}
+		r.replicateToNeighbor(replicateMsg, neighbor)
+	}
+
+	r.node.Reply(msg, &ReplicateOkMsg{
+		Type: "replicate_ok",
+    })
+
+	return nil
+}
+
+type tracker struct {
+	seen atomic.Value
+	mu   sync.Mutex
+}
+
+func newTracker() *tracker {
+	t := &tracker{}
+	t.seen.Store(make(map[int]bool))
+	return t
+}
+
+func (t *tracker) add(i int) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	current := t.seen.Load().(map[int]bool)
+	newSeen := make(map[int]bool, len(current))
+	for k, v := range current {
+		newSeen[k] = v
+	}
+	newSeen[i] = true
+	t.seen.Store(newSeen)
+}
+
+func (t *tracker) values() []int {
+	seen := t.seen.Load().(map[int]bool)
+	vals := make([]int, 0, len(seen))
+	for key, val := range seen {
+		if val {
+			vals = append(vals, key)
+		}
+	}
+	return vals
+}
+
+type topologyInfo struct {
+	myNeighboors []string
+	ready        sync.WaitGroup
+	init         sync.Once
+}
+
+func newTopologyInfo() *topologyInfo {
+	ti := topologyInfo{}
+	ti.ready.Add(1)
+	return &ti
+}
+
+func (ti *topologyInfo) set(me string, topology map[string][]string) {
+	ti.myNeighboors = topology[me]
+	ti.init.Do(func() {
+		ti.ready.Done()
+	})
+}
+
+func (ti *topologyInfo) neighbors() []string {
+	ti.ready.Wait()
+	return ti.myNeighboors
 }
