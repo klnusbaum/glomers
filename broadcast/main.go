@@ -122,11 +122,11 @@ func (bh *broadcastHandler) replicate(val int) {
 	}
 
 	me := bh.node.ID()
-	for _, other := range bh.node.NodeIDs() {
-		if other == me {
+	for _, node := range bh.node.NodeIDs() {
+		if node == me {
 			continue
 		}
-		go bh.replicateTo(msg, other)
+		go bh.replicateTo(msg, node)
 	}
 }
 
